@@ -20,6 +20,8 @@ import { auth } from '../firebase'
 
 // The fixed username is mapped to this Firebase Auth email.
 const FIXED_EMAIL = 'hudson@gmail.com'
+// Admin account for the management panel.
+const ADMIN_EMAIL = 'admin@gmail.com'
 
 const AuthContext = createContext(null)
 
@@ -37,13 +39,15 @@ export function AuthProvider({ children }) {
     const unsub = onAuthStateChanged(auth, (fbUser) => {
       if (fbUser) {
         const email = fbUser.email || ''
-        const username = email === FIXED_EMAIL ? 'hudson' : email
+        const isAdmin = email === ADMIN_EMAIL
+        const username = email === FIXED_EMAIL ? 'hudson' : isAdmin ? 'admin' : email
         setUser({
           name: username || 'Band member',
           username,
           email: fbUser.email,
           uid: fbUser.uid,
           isAnonymous: fbUser.isAnonymous,
+          isAdmin,
         })
       } else {
         setUser(null)
@@ -53,8 +57,13 @@ export function AuthProvider({ children }) {
     return unsub
   }, [])
 
-  async function login(password) {
-    const cred = await signInWithEmailAndPassword(auth, FIXED_EMAIL, password)
+  async function login(password, email = FIXED_EMAIL) {
+    // If a different user is already signed in, sign them out first
+    // so Firebase Auth can authenticate the requested account cleanly.
+    if (auth.currentUser && auth.currentUser.email !== email) {
+      await signOut(auth)
+    }
+    const cred = await signInWithEmailAndPassword(auth, email, password)
     return cred.user
   }
 

@@ -21,7 +21,8 @@ export default function Home() {
   const [loading, setLoading] = useState(true)
   const [current, setCurrent] = useState(null)
 
-  // Fetch the catalogue via the auth-gated Cloud Function.
+  // Fetch the catalogue via the auth-gated Cloud Function,
+  // then apply the saved playlist order if one exists.
   useEffect(() => {
     let cancelled = false
     ;(async () => {
@@ -29,13 +30,31 @@ export default function Home() {
         const catalogue = httpsCallable(functions, 'catalogue')
         const { data } = await catalogue()
         if (cancelled) return
-        setTracks(
-          (data.tracks || []).map((t) => ({
-            id: t.id,
-            title: t.title,
-            artist: 'Hudson',
-          })),
-        )
+
+        let list = (data.tracks || []).map((t) => ({
+          id: t.id,
+          title: t.title,
+          artist: 'Hudson',
+        }))
+
+        // Try to load the saved order from Storage.
+        try {
+          const orderUrl = `https://storage.googleapis.com/${import.meta.env.VITE_FIREBASE_STORAGE_BUCKET}/playlists/order.json`
+          const res = await fetch(orderUrl, { cache: 'no-store' })
+          if (res.ok) {
+            const { order } = await res.json()
+            if (Array.isArray(order)) {
+              const byId = new Map(list.map((t) => [t.id, t]))
+              const ordered = order.map((id) => byId.get(id)).filter(Boolean)
+              const remaining = list.filter((t) => !order.includes(t.id))
+              list = [...ordered, ...remaining]
+            }
+          }
+        } catch {
+          /* no saved order yet — fall back to catalogue order */
+        }
+
+        setTracks(list)
       } catch (err) {
         // eslint-disable-next-line no-console
         console.error('[home] failed to load catalogue', err)
@@ -101,7 +120,7 @@ export default function Home() {
           </h2>
           <Playlist
             tracks={tracks}
-            loading={false}
+            loading={loading}
             currentId={current?.id}
             onSelect={setCurrent}
           />

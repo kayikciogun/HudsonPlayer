@@ -18,6 +18,14 @@ service firebase.storage {
       allow write: if false;
     }
 
+    // ─── Public playlist order document ───
+    // Written only by the savePlaylistOrder Cloud Function (via Admin SDK).
+    // Clients read it to render the custom track order.
+    match /playlists/order.json {
+      allow read: if true;
+      allow write: if false;
+    }
+
     // ─── Legacy plain .mp3 in /tracks/ ───
     // Hard-closed.
     match /tracks/{file} {

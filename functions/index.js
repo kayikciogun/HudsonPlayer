@@ -40,6 +40,7 @@ const BUCKET = 'hudson-65e88.firebasestorage.app'
 const STORAGE_BASE = `https://storage.googleapis.com/${BUCKET}`
 const ID_RE = /^[\p{L}\p{N}_-]+$/u
 const KEY_RE = /^[\p{L}\p{N}_-]+\.key$/u
+const ADMIN_EMAIL = 'admin@gmail.com'
 
 const bucket = getStorage().bucket(BUCKET)
 
@@ -54,6 +55,13 @@ function assertAuth(req) {
     req.auth.token?.firebase?.sign_in_provider === 'anonymous'
   ) {
     throw new HttpsError('unauthenticated', 'Anonymous sign-in is not allowed.')
+  }
+}
+
+function assertAdmin(req) {
+  assertAuth(req)
+  if (req.auth.token?.email !== ADMIN_EMAIL) {
+    throw new HttpsError('permission-denied', 'Admin access required.')
   }
 }
 
@@ -125,6 +133,58 @@ exports.m3u8 = onCall(
     )
 
     return { text }
+  },
+)
+
+// ─── deleteTrack ───────────────────────────────
+// Admin-only callable. Removes the HLS segment folder
+// and the AES key for a track from Storage.
+exports.deleteTrack = onCall(
+  { region: 'us-central1', cors: true },
+  async (req) => {
+    assertAdmin(req)
+    const id = safeId(req.data?.id)
+
+    const prefix = `tracks-hls/${id}/`
+    const keyPath = `keys/${id}.key`
+
+    try {
+      // Delete all objects under tracks-hls/<id>/
+      const [files] = await bucket.getFiles({ prefix })
+      await Promise.all(files.map((f) => f.delete()))
+
+      // Delete the AES key
+      await bucket.file(keyPath).delete()
+
+      return { ok: true }
+    } catch (err) {
+      console.error('[deleteTrack]', id, err)
+      throw new HttpsError('internal', 'Failed to delete track.')
+    }
+  },
+)
+
+// ─── savePlaylistOrder ─────────────────────────
+// Admin-only callable. Persists a custom track order
+// to a public JSON document in Storage. The client can
+// read this to override alphabetical ordering.
+exports.savePlaylistOrder = onCall(
+  { region: 'us-central1', cors: true },
+  async (req) => {
+    assertAdmin(req)
+    const order = req.data?.order
+    if (!Array.isArray(order) || !order.every((id) => typeof id === 'string' && ID_RE.test(id))) {
+      throw new HttpsError('invalid-argument', 'Bad order array.')
+    }
+
+    const payload = JSON.stringify({ order, updatedAt: new Date().toISOString() }, null, 2)
+    const file = bucket.file('playlists/order.json')
+    await file.save(payload, {
+      contentType: 'application/json',
+      metadata: { cacheControl: 'public, max-age=60' },
+    })
+
+    return { ok: true }
   },
 )
 
