@@ -49,7 +49,7 @@ for src in "$SRC"/*.mp3; do
     -i "$src" \
     -c:a aac -b:a 128k \
     -f hls \
-    -hls_time 6 \
+    -hls_time 10 \
     -hls_playlist_type vod \
     -hls_segment_type mpegts \
     -hls_key_info_file "$keyinfo" \

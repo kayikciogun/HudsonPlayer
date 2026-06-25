@@ -3,47 +3,41 @@
 //
 // Cloud Functions that gate access to the Hudson HLS catalogue.
 //
-// Approach: PROXY, not signed URLs.
-//   - We never mint a Storage signed URL (which needs the
-//     iam.serviceAccounts.signBlob permission that 2nd-gen
-//     functions don't get by default). Instead, each function
-//     reads the bytes from Storage via the Admin SDK and
-//     returns them to the caller. The Storage object is never
-//     publicly addressable.
-//   - Every function verifies request.auth (Firebase ID token)
-//     and rejects anonymous sign-in.
+// Architecture (ultra-efficient, decoupled CDN):
+//   - .ts segments are AES-128 encrypted → public Storage read.
+//     The client fetches them DIRECTLY from Storage (no CF proxy),
+//     saving ~100% of Cloud Function egress cost.
+//   - The 16-byte AES key is the only secret. It is served via
+//     an onRequest HTTP function that validates the Firebase ID
+//     token from the Authorization header and returns raw binary
+//     (no base64 overhead).
+//   - The m3u8 playlist is served via onCall (JSON, small payload)
+//     with segment URIs rewritten to absolute Storage URLs and
+//     the key URI pointing to the onRequest endpoint.
 //
-// Endpoints (all callable):
+// Endpoints:
 //
 //   catalogue()  → { tracks: [{ id, title }] }
-//     Lists every track by scanning the Storage prefix
-//     tracks-hls/. No URLs are returned.
+//     Lists every track by scanning the Storage prefix tracks-hls/.
 //
 //   m3u8({ id })  → { text }
-//     Returns the index.m3u8 as a string. The on-disk m3u8
-//     contains relative URIs (seg_000.ts / <id>.key); the
-//     player feeds this to hls.js as a Blob and resolves each
-//     line via segment().
+//     Returns the index.m3u8 with segment URIs rewritten to
+//     absolute Storage URLs and the key URI pointing to the
+//     onRequest key endpoint.
 //
-//   segment({ id, file })  → { base64, contentType }
-//     Returns a single .ts segment or .key file as base64.
-//     The player turns it into a Blob URL for hls.js.
-//
-// Why base64 for segments: callable functions return JSON,
-// which cannot carry raw binary. base64 is the simplest
-// transport. Segments are ~6s of 128kbps audio ≈ 100 KB,
-// well within the callable response limit (10 MB).
+//   key  (onRequest HTTP GET /key?id=<trackId>)
+//     Returns the raw 16-byte AES-128 key as binary (no base64).
+//     Requires Authorization: Bearer <idToken> header.
 // ──────────────────────────────────────────────
-const { onCall, HttpsError } = require('firebase-functions/v2/https')
+const { onCall, onRequest, HttpsError } = require('firebase-functions/v2/https')
 const { initializeApp } = require('firebase-admin/app')
 const { getStorage } = require('firebase-admin/storage')
+const { getAuth } = require('firebase-admin/auth')
 
 initializeApp()
 
 const BUCKET = 'hudson-65e88.firebasestorage.app'
-const SEGMENT_RE = /^seg_\d{3}\.ts$/
-// Track ids contain Turkish letters (Ş, Ö, İ, ç, ğ, …) — allow any
-// Unicode letter/digit/underscore/hyphen.
+const STORAGE_BASE = `https://storage.googleapis.com/${BUCKET}`
 const ID_RE = /^[\p{L}\p{N}_-]+$/u
 const KEY_RE = /^[\p{L}\p{N}_-]+\.key$/u
 
@@ -70,7 +64,6 @@ function safeId(id) {
   return id
 }
 
-// Read a Storage file into a Buffer.
 async function readBytes(path) {
   const [buf] = await bucket.file(path).download()
   return buf
@@ -99,9 +92,9 @@ exports.catalogue = onCall(
 )
 
 // ─── m3u8 ──────────────────────────────────────
-// Returns the index.m3u8 as a string. The on-disk m3u8
-// contains relative URIs; the player feeds it to hls.js
-// as a Blob and resolves each line via segment().
+// Returns the index.m3u8 with segment URIs rewritten to absolute
+// Storage URLs (public, no auth needed) and the key URI pointing
+// to the onRequest key endpoint (auth-gated).
 exports.m3u8 = onCall(
   { region: 'us-central1', cors: true },
   async (req) => {
@@ -109,37 +102,90 @@ exports.m3u8 = onCall(
     const id = safeId(req.data?.id)
 
     const buf = await readBytes(`tracks-hls/${id}/index.m3u8`)
-    return { text: buf.toString('utf8') }
+    let text = buf.toString('utf8')
+
+    // Rewrite segment URIs to absolute Storage URLs (public read).
+    // seg_000.ts → https://storage.googleapis.com/<bucket>/tracks-hls/<id>/seg_000.ts
+    text = text.replace(
+      /^(seg_\d{3}\.ts)$/gm,
+      `${STORAGE_BASE}/tracks-hls/${encodeURIComponent(id)}/$1`,
+    )
+
+    // Rewrite key URI to the onRequest key endpoint.
+    // <id>.key → /api/key?id=<id>
+    text = text.replace(
+      /#EXT-X-KEY:METHOD=AES-128,URI="([^"]+)"/,
+      (match, uri) => {
+        const keyFile = uri.split('/').pop()
+        if (KEY_RE.test(keyFile)) {
+          return `#EXT-X-KEY:METHOD=AES-128,URI="/api/key?id=${encodeURIComponent(id)}"`
+        }
+        return match
+      },
+    )
+
+    return { text }
   },
 )
 
-// ─── segment ────────────────────────────────────
-// Returns a single segment or key as base64 + content type.
-exports.segment = onCall(
+// ─── key (onRequest) ───────────────────────────
+// Returns the raw 16-byte AES-128 key as binary.
+// Validates the Firebase ID token from the Authorization header.
+// No base64 — the client receives the raw bytes directly.
+exports.key = onRequest(
   { region: 'us-central1', cors: true },
-  async (req) => {
-    assertAuth(req)
-    const id = safeId(req.data?.id)
-    const file = req.data?.file
-    if (typeof file !== 'string') {
-      throw new HttpsError('invalid-argument', 'Bad file name.')
+  async (req, res) => {
+    // CORS preflight
+    res.set('Access-Control-Allow-Origin', req.headers.origin || '*')
+    res.set('Access-Control-Allow-Headers', 'Authorization, Content-Type')
+    res.set('Access-Control-Allow-Methods', 'GET, OPTIONS')
+    res.set('Access-Control-Max-Age', '3600')
+
+    if (req.method === 'OPTIONS') {
+      res.status(204).send('')
+      return
     }
 
-    let path, contentType
-    if (SEGMENT_RE.test(file)) {
-      path = `tracks-hls/${id}/${file}`
-      contentType = 'video/mp2t'
-    } else if (KEY_RE.test(file) && file === `${id}.key`) {
-      path = `keys/${file}`
-      contentType = 'application/octet-stream'
-    } else {
-      throw new HttpsError('invalid-argument', 'Unsupported file.')
+    if (req.method !== 'GET') {
+      res.status(405).send('Method Not Allowed')
+      return
     }
 
-    const buf = await readBytes(path)
-    return {
-      base64: buf.toString('base64'),
-      contentType,
+    // Validate auth token from Authorization header
+    const authHeader = req.headers.authorization
+    if (!authHeader || !authHeader.startsWith('Bearer ')) {
+      res.status(401).send('Unauthorized')
+      return
+    }
+    const idToken = authHeader.split('Bearer ')[1]
+    let decoded
+    try {
+      decoded = await getAuth().verifyIdToken(idToken)
+    } catch {
+      res.status(401).send('Unauthorized')
+      return
+    }
+    if (
+      !decoded.uid ||
+      decoded.firebase?.sign_in_provider === 'anonymous'
+    ) {
+      res.status(401).send('Unauthorized')
+      return
+    }
+
+    const id = req.query.id
+    if (typeof id !== 'string' || !ID_RE.test(id)) {
+      res.status(400).send('Bad track id')
+      return
+    }
+
+    try {
+      const buf = await readBytes(`keys/${id}.key`)
+      res.set('Content-Type', 'application/octet-stream')
+      res.set('Cache-Control', 'private, max-age=300')
+      res.send(buf)
+    } catch {
+      res.status(404).send('Key not found')
     }
   },
 )
