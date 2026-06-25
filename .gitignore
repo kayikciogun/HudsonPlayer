@@ -1,0 +1,21 @@
+node_modules
+dist
+.env
+.env.local
+*.log
+.DS_Store
+
+# Service account JSON — never commit
+hudson-65e88-firebase-adminsdk-*.json
+functions/.env
+functions/node_modules
+functions/lib
+
+# Generated HLS build artefacts (regenerated from mp3_export/)
+hls_build/
+
+# Source MP3s — kept locally, not in git (88MB)
+mp3_export/
+
+# Firebase CLI local cache
+.firebase/

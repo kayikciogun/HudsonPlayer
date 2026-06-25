@@ -1,0 +1,16 @@
+[
+  {
+    "origin": ["https://hudson-65e88.web.app", "http://localhost:5173", "http://127.0.0.1:5173"],
+    "method": ["GET", "HEAD", "OPTIONS"],
+    "maxAgeSeconds": 3600,
+    "responseHeader": [
+      "Content-Type",
+      "Content-Length",
+      "Range",
+      "Accept-Encoding",
+      "Authorization",
+      "Access-Control-Allow-Origin",
+      "Access-Control-Allow-Headers"
+    ]
+  }
+]

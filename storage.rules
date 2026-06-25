@@ -1,0 +1,30 @@
+rules_version = '2';
+service firebase.storage {
+  match /b/{bucket}/o {
+
+    // ─── HLS AES key files ───
+    // Authenticated users only. The key is the actual secret.
+    match /keys/{file} {
+      allow read: if request.auth != null;
+      allow write: if false;
+    }
+
+    // ─── HLS segments + playlists ───
+    // Authenticated users only.
+    match /tracks-hls/{path=**} {
+      allow read: if request.auth != null;
+      allow write: if false;
+    }
+
+    // ─── Legacy plain .mp3 in /tracks/ ───
+    // Hard-closed.
+    match /tracks/{file} {
+      allow read, write: if false;
+    }
+
+    // ─── Default deny ───
+    match /{path=**} {
+      allow read, write: if false;
+    }
+  }
+}
