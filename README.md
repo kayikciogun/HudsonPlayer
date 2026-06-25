@@ -38,11 +38,11 @@ The core design choice is a **proxy model, not signed URLs**. 2nd-gen Cloud Func
 Two paths depending on browser HLS support:
 
 - **hls.js path (Chrome/Firefox):** the m3u8 text is fed to hls.js as a **Blob URL**. The AES-128 key URI is pre-resolved to a Blob URL inside the manifest (the key is tiny ~16 B). A **custom fragment loader** (`ProxyLoader`) intercepts every segment load: it calls the `segment` callable, converts the base64 response to a Blob, and hands it to hls.js. Segments are fetched **on demand** — playback starts as soon as the first segment arrives, no pre-fetch of the whole track.
-- **Safari native HLS:** every segment and key is inlined as a `data:` URL into the m3u8, then the whole Blob is fed to `<audio>`. The signed/proxy URL never appears in DevTools.
+- **Safari native HLS:** every segment and key is inlined as a `data:` URL into the m3u8, then the whole Blob is fed to `<audio>`. The proxy URL never appears in DevTools.
 
 ### Known Chrome quirk: `duration === Infinity`
 
-hls.js + Blob-URL sources in Chrome report `audio.duration === Infinity` (an MSE bug). The player works around this by **summing every `#EXTINF` line in the manifest** (`durationFromM3u8()`) and using that finite value for the scrubber, seek math, and time display.
+hls.js + Blob-URL sources in Chrome report `audio.duration === Infinity` (an MSE bug). The player works around this by **summing every `#EXTINF` line in the manifest** (`durationFromM3u8()`) and using that finite value for seek math and time tracking.
 
 ### Time updates: rAF poll, not `timeupdate`
 
@@ -50,21 +50,7 @@ hls.js + Blob-URL sources in Chrome report `audio.duration === Infinity` (an MSE
 
 ### Auth model
 
-A **single shared Firebase Auth account** (`hudson@gmail.com`) is created in the Firebase Console. The login screen shows only a **password field** — the username is hardcoded to `hudson` and mapped to that fixed email. There is no anonymous sign-in; the Cloud Functions reject `sign_in_provider === 'anonymous'`. Session persists via Firebase's default local storage.
-
----
-
-## Features
-
-- Single-password auth via Firebase email/password (no bundle secret, no anonymous).
-- Dark, Tailwind-powered UI with a sticky bottom audio HUD: drag-to-scrub, keyboard nav (←/→ 5 s, Shift+arrow 15 s, Home/End), hover preview tooltip, buffered-range hint.
-- Anti-download / anti-scrape stack:
-  1. Tracks transcoded to HLS `.ts` segments, each **AES-128 encrypted** with a per-track key (`scripts/encrypt_hls.sh`).
-  2. Keys and segments live behind Storage rules requiring `request.auth != null` — **no public read anywhere**.
-  3. The client never receives a Storage URL — bytes are proxied as base64 through callables that verify the Firebase ID token.
-  4. On-disk m3u8s contain only relative file names (`scripts/relativize_m3u8.mjs`).
-  5. CORS locked to the hosting origin (+ localhost for dev).
-  6. Right-click and drag blocked throughout the UI; `<audio>` is hidden with a fully custom control surface.
+A **single shared Firebase Auth account** (`hudson@gmail.com`) is created in the Firebase Console. The username is hardcoded to `hudson` and mapped to that fixed email. There is no anonymous sign-in; the Cloud Functions reject `sign_in_provider === 'anonymous'`. Session persists via Firebase's default local storage.
 
 ---
 
@@ -196,9 +182,8 @@ Open http://localhost:5173. To test the full auth + proxy flow against emulators
 | Cloud Function base64 proxy | Verifies Firebase ID token on every `catalogue` / `m3u8` / `segment` call; reads bytes server-side, returns them as base64 — **no Storage URL ever reaches the client** |
 | Relative m3u8 URIs | No long-lived tokens baked into playlists; segments resolved per-request through the proxy |
 | CORS locked to hosting origin (+ localhost for dev) | Hotlinking / bandwidth theft from other sites |
-| Hidden `<audio>` + custom UI + right-click/drag block | Casual "Save audio as…" attempts |
 
-> Client-side measures deter casual users but cannot fully prevent a determined attacker who can capture decrypted audio post-DSP. For true DRM use Widevine/FairPlay/PlayReady with a license server. The current model raises the bar from "one `curl | ffmpeg`" to "authenticated session + server-side proxy + no exposed Storage URLs," appropriate for a private band repertoire.
+> Client-side measures cannot fully prevent a determined attacker who can capture decrypted audio post-DSP. For true DRM use Widevine/FairPlay/PlayReady with a license server. The current model raises the bar from "one `curl | ffmpeg`" to "authenticated session + server-side proxy + no exposed Storage URLs," appropriate for a private band repertoire.
 
 ---
 
